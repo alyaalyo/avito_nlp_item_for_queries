@@ -12,8 +12,13 @@ BENCH_ITEMS_PATH = DATA_DIR / "benchmark_items.parquet"
 BENCH_QUERIES_PATH = DATA_DIR / "benchmark_queries.parquet"
 
 # Все промежуточные артефакты (кэши, индексы, модели) складываем сюда.
-WORK = ROOT / "work"
+# AVITO_WORK_DIR позволяет прогнать пайплайн в отдельной «чистой» папке.
+WORK = Path(os.environ.get("AVITO_WORK_DIR", ROOT / "work"))
 WORK.mkdir(exist_ok=True)
+
+# GitHub Release с обученными моделями — для точного воспроизведения answer.csv
+# без повторного обучения (см. download_artifacts.py и README).
+RELEASE_URL = "https://github.com/alyaalyo/avito_nlp_item_for_queries/releases/download/v1.0"
 
 SEED = 42
 TOP_K = 50  # сколько кандидатов отдаём на запрос

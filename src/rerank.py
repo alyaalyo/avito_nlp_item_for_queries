@@ -7,8 +7,13 @@
 правильные объявления, не попавшие в кандидаты, считаются промахом.
 
 Финальная модель обучается на всём holdout и ранжирует кандидатов бенчмарка.
+
+Режим --predict_only: не обучаем ничего, а берём готовую модель work/ranker.txt
+(из GitHub Release) и ранжируем кандидатов бенчмарка — так проверяющий получает
+ровно тот answer.csv, что был отправлен.
 """
 import argparse
+import pickle
 import time
 
 import lightgbm as lgb
@@ -101,13 +106,39 @@ def top_k_by_query(q_idx, c_idx, score, corpus_ids, k=TOP_K) -> dict:
     return {qs[a]: list(corpus_ids[cs[a:min(b, a + k)]]) for a, b in zip(starts, ends)}
 
 
+def write_answer(model, q, q_idx, c_idx, X, split, ids, out):
+    """Ранжирует кандидатов бенчмарка моделью и сохраняет answer.csv."""
+    be = np.flatnonzero(split == "bench")
+    s = model.predict(X[be], num_threads=10)
+    top = top_k_by_query(q_idx[be], c_idx[be], s, ids)
+    bq = q[q.split == "bench"]
+    answer = pd.DataFrame({
+        "query_id": bq.qid.values,
+        "answer": [" ".join(top.get(qi, [])) for qi in bq.index.values],
+    })
+    answer.to_csv(out, index=False, lineterminator="\n")  # одинаковые переводы строк на любой ОС
+    print(f"saved {out}")
+
+
+def predict_only(args):
+    q = load_queries()
+    ids = load_corpus(q).item_id.values
+    q_idx, c_idx, _, X, feats = load_features(WORK / args.cands, keep_split="bench", queries=q)
+    model = lgb.Booster(model_file=str(WORK / "ranker.txt"))
+    assert model.num_feature() == len(feats), "набор признаков не совпадает с обученной моделью"
+    write_answer(model, q, q_idx, c_idx, X, q.split.values[q_idx], ids, args.out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "answer.csv"))
     ap.add_argument("--no_final", action="store_true", help="только кросс-валидация")
+    ap.add_argument("--predict_only", action="store_true", help="только применить готовый work/ranker.txt")
     ap.add_argument("--cands", default="cands_all.parquet")
     ap.add_argument("--rounds", type=int, default=N_ROUNDS)
     args = ap.parse_args()
+    if args.predict_only:
+        return predict_only(args)
 
     t0 = time.time()
     q = load_queries()
@@ -142,6 +173,9 @@ def main():
     for c in base_cols:
         print(f"only {c:8s}:", recall_report(base[c], hq, T))
     print("LightGBM CV:    ", recall_report(pred_cv, hq, T))
+    # out-of-fold предсказания сохраняем для анализа ошибок (analyze_errors.py)
+    with open(WORK / "cv_pred.pkl", "wb") as fh:
+        pickle.dump(pred_cv, fh)
 
     imp = pd.Series(m.feature_importance("gain"), index=feats).sort_values(ascending=False)
     print("top features:", ", ".join(f"{k}={v:.0f}" for k, v in imp.head(20).items()))
@@ -152,16 +186,8 @@ def main():
     tr = np.flatnonzero(split == "hold")
     m = train_model(X[tr], y[tr], q_idx[tr], args.rounds)
     m.save_model(str(WORK / "ranker.txt"))
-    be = np.flatnonzero(split == "bench")
-    s = m.predict(X[be], num_threads=10)
-    top = top_k_by_query(q_idx[be], c_idx[be], s, ids)
-    bq = q[q.split == "bench"]
-    answer = pd.DataFrame({
-        "query_id": bq.qid.values,
-        "answer": [" ".join(top.get(qi, [])) for qi in bq.index.values],
-    })
-    answer.to_csv(args.out, index=False)
-    print(f"saved {args.out}  {time.time() - t0:.0f}s")
+    write_answer(m, q, q_idx, c_idx, X, split, ids, args.out)
+    print(f"total {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":
